@@ -226,7 +226,7 @@ export async function apply(ctx, config) {
   function liveOptionsRouteOf(agent) {
     const model = typeof agent?.options?.model === 'string' ? agent.options.model : undefined
     const provider = typeof agent?.options?.provider === 'string' ? agent.options.provider : undefined
-       if (!model) return null
+    if (!model) return null
     return { provider: provider ?? null, model, effort: agent?.options?.reasoningEffort ?? null }
   }
 
