@@ -1,0 +1,5 @@
+- insert:
+    - id: team-member-model
+      name: dsh-team-member-model
+      config:
+        enabled: true

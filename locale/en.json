@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Team Member Model",
+    "description": "Pins a model route per team teammate (or any delegated child session) from a chip in that session's composer bar. Overrides the real request header and survives restarts."
+  }
+}
