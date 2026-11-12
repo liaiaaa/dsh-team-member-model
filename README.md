@@ -55,14 +55,26 @@ dom.deepseek-v4-flash  ⌄      ← 已指定（强调色，无边框透明底 2
   `ReactDOM.createPortal(…, document.body)` + `position:fixed; z-index:1100`，
   与 composer 布局完全隔离——这是 v1「输入框上移/UI 崩坏」的修法。
 
-### HTTP 面（同源，页面内可直接 fetch）
+### HTTP 面（每个入口都过 Connection 官方围栏，页面内同源 fetch 直接带 cookie）
 
 ```
 GET  /plugin/team-member-model/state?sessionId=…   # teammate/delegated/remembered/name/inherited/route/catalog
-POST /plugin/team-member-model/route               # {sessionId, route:{provider,model,effort}|null}
+POST /plugin/team-member-model/route               # {sessionId, route:{provider,model,effort}|null}，需 application/json
 GET  /plugin/team-member-model/ping                # routes 数、enabled、clientLoaded（客户端心跳计数）
-POST /plugin/team-member-model/hello               # 客户端模块到达宿主的证明
+POST /plugin/team-member-model/hello               # 客户端模块到达宿主的证明，需 application/json
 ```
+
+**准入（v2.2，2026-11-12，awesome 维护者评审建议）**：dsh 对 `webServer` prefix
+路由不做准入（只有 `/api` 网关和 `ctx.connection.fetch` 精确路由过 Connection 的
+Host/Origin 围栏），所以本插件每个入口先走 `ctx.connection.requestRejection(req)`：
+
+- 403：Host 非 loopback/受信地址、`sec-fetch-site: cross-site`、或 Origin 与 Host 不同源；
+- 401：没有有效的 `dsh-auth-*` 浏览器会话 cookie（桌面壳转发时注入，浏览器同源
+  fetch 自动携带）；
+- 415：POST 请求体不是 `application/json`（封掉跨站 `text/plain` 简单请求）。
+
+正常路径不受影响：桌面壳（`dsh-app://app`）转发请求统一带宿主登录 cookie 且不带
+Origin；浏览器直开的页面同源 fetch 自动带 cookie。裸 curl / 跨站请求一律被拒。
 
 ## 安装 / 验证 / 卸载
 
@@ -71,9 +83,11 @@ POST /plugin/team-member-model/hello               # 客户端模块到达宿主
 # plugin_manager: install_bundle → https://github.com/liaiaaa/dsh-team-member-model
 # 本机开发：install_bundle → 插件目录绝对路径（link 安装，改动重启后生效）
 
-# 验证
-curl -s http://127.0.0.1:<port>/plugin/team-member-model/ping
-curl -s "http://127.0.0.1:<port>/plugin/team-member-model/state?sessionId=<成员会话id>" | head -c 400
+# 验证（v2.2 起需登录 cookie：先认证换 cookie，再用它打插件路由）
+LAUNCH_URL="http://127.0.0.1:<port>/?token=<启动URL里的token>"   # dsh web 打印的 URL
+COOKIE=$(curl -si "$LAUNCH_URL" | grep -oi '^set-cookie: [^;]*' | cut -d' ' -f2-)
+curl -s -H "Cookie: $COOKIE" http://127.0.0.1:<port>/plugin/team-member-model/ping
+curl -s -H "Cookie: $COOKIE" "http://127.0.0.1:<port>/plugin/team-member-model/state?sessionId=<成员会话id>" | head -c 400
 cat ~/.dsh/plugin-data/team-member-model.json
 # 端到端：给该成员发一条消息，再解它的会话日志看 request/header 的 provider/model
 zstdcat ~/.dsh/sessions/<workspace-slug>/<childId>/session.v4.jsonl.zstd \
@@ -106,5 +120,9 @@ zstdcat ~/.dsh/sessions/<workspace-slug>/<childId>/session.v4.jsonl.zstd \
 - 实测（2026-11-10，v2.1）：隔离实例给冷成员发消息唤醒 → 成员 journal 写入跟随
   其 Lead 当前模型的 `model/selection`（且先于 `request/context` 捕获生效）。
   附带事实：**光打开会话视图不会冷唤醒成员 agent**，投递消息才会。
+- **v2.2（2026-11-12）**：HTTP 入口全部加 Connection 官方围栏
+  （`requestRejection` + `application/json` 强制）。插件 `inject` 新增 `connection`
+  依赖（官方 `dsh-host-open-in-app` 同款）；所在 profile 没有 client-connection
+  服务时插件整体不加载（fail-closed，不会静默裸奔）。详见上面「HTTP 面」的准入节。
 - 宿主模型目录 ≠ AIHub 线路实况：目录随 dsh 版本变化（`qoder.Qwen3.8-Flash` 曾在
   目录里、2026-11-09 已不在），指定前最好先在面板里看一眼列表。
