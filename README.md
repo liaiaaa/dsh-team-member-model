@@ -99,6 +99,8 @@ COOKIE=$(curl -si "$LAUNCH_URL" | grep -oi '^set-cookie: [^;]*' | cut -d' ' -f2-
 curl -s -H "Cookie: $COOKIE" http://127.0.0.1:<port>/plugin/team-member-model/ping
 curl -s -H "Cookie: $COOKIE" "http://127.0.0.1:<port>/plugin/team-member-model/state?sessionId=<成员会话id>" | head -c 400
 cat ~/.dsh/plugin-data/team-member-model.json
+# v3 行为级离线测试（mock ctx：根不写/跟随/指定/rootOf 抛错，10 项断言）
+node tests/host-behavior.mjs
 # 端到端：给该成员发一条消息，再解它的会话日志看 request/header 的 provider/model
 zstdcat ~/.dsh/sessions/<workspace-slug>/<childId>/session.v4.jsonl.zstd \
   | python3 -c "import sys,json;[print(json.loads(l)['data']['header']['config'].get('provider'),json.loads(l)['data']['header']['config'].get('model')) for l in sys.stdin if '\"request/header\"' in l]"
