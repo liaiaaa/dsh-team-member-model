@@ -1,5 +1,16 @@
 /**
- * dsh-team-member-model v2.2 — Host half.
+ * dsh-team-member-model v3 — Host half.
+ *
+ * v3（2026-11-14，适配 dsh 0.2.2-rc.3）：rc.3 删除了 `ctx.agents.roots()` 与
+ * `agentTeams.listMembers()/tryMembership()`，v2 的根/Lead/成员解析层全部失效
+ * （后果：isRoot 恒 false → 胶囊显示在主对话、点它会误写 Lead 的 model/selection）。
+ * v3 改用 rc.3 的权威 API：
+ *   - root ⇔ `agent.session.header.parentSession === undefined`
+ *   - Lead ⇔ `ctx.subagents.rootOf(memberAgent)`（返回树根 Agent，自己就是 root 时跳过）
+ *   - 成员名 ⇔ `ctx.subagents.namesOf(agent).self`（root 显示 'lead'）
+ *   - 冷成员目录 ⇔ `ctx.subagents.listDescendants(rootSessionId)`（不唤醒 agent）
+ * 写入通路不变（`agent.model.select()` + `agent/created` + `agent/inbox/claimed`），
+ * v2.2 的 HTTP 围栏不变。
  *
  * 为单个团队子队友（或任意委托子会话）指定模型路线：
  *  - 官方通道：在成员 agent 的 pre-step 之前把路线写进其会话的
@@ -144,62 +155,97 @@ export async function apply(ctx, config) {
     }
   }
 
-  // ---- team/roster lookup: session id -> teammate row（冷成员也能查到） ----
-  // 活成员优先走官方 tryMembership 直查（权威 Lead 的名册）；冷成员退回遍历
-  // （只用于 chip 显示名字/状态，最坏拿到 fork 会话的陈旧行，无害）。
-  function resolveMember(sessionId) {
-    const teams = ctx.get('agentTeams', false)
-    if (!teams?.listMembers) return null
-    const live = ctx.agents.get(sessionId)
-    if (live && typeof teams.tryMembership === 'function') {
-      try {
-        const membership = teams.tryMembership(live)
-        if (membership?.role === 'teammate' && membership.root) {
-          const hit = (teams.listMembers(membership.root) ?? []).find(
-            (row) => row.role === 'teammate' && String(row.id) === String(sessionId),
-          )
-          if (hit) return hit
-        }
-      } catch {
-        // 落到下面的遍历
-      }
-    }
-    for (const agent of ctx.agents.list()) {
-      let rows = []
-      try {
-        rows = teams.listMembers(agent) ?? []
-      } catch {
-        continue // 不是团队 caller
-      }
-      const hit = rows.find((row) => row.role === 'teammate' && String(row.id) === String(sessionId))
-      if (hit) return hit
-    }
-    return null
-  }
-
+  // ---- rc.3 解析层：ctx.subagents + SessionHeader.parentSession ----
+  // dsh 0.2.2-rc.3 移除了 ctx.agents.roots() 与 agentTeams.listMembers/tryMembership，
+  // 现行权威语义：
+  //   root ⇔ session.header.parentSession === undefined（SessionHeader 字段仍在）
+  //   Lead ⇔ ctx.subagents.rootOf(agent)（rootOf 抛错=树根不可用）
+  //   名 ⇔ ctx.subagents.namesOf(agent).self（root 为 'lead'，成员为斜杠路径）
+  //   冷成员 ⇔ ctx.subagents.listDescendants(rootSessionId)（只读耐久目录，不唤醒）
+  // ⚠️ 绝不「遍历 agent 查谁的名册包含我」反查 Lead：v2.1 已证伪（有概率认错）。
   function isRoot(agent) {
     try {
-      return ctx.agents.roots().some((root) => root.id === agent.id)
+      return agent?.session?.header?.parentSession === undefined
     } catch {
       return false
     }
   }
 
-  /** 成员 agent 所属团队的 Lead agent —— 官方语义，权威且确定。
-   *  tryMembership 用 agent.session.header.parentSession 解析团队，role:'teammate'
-   *  的 membership.root 就是真正的 Lead（dsh-experimental-agent-team/lib/index.js:873-899）。
-   *  ⚠️ 绝不要「遍历 agent 查谁的名册包含我」：listMembers 对团队里**任何成员**
-   *  都返回全量名册，兄弟成员/成员自己/带 fork journal 的伪 Lead 都会命中，
-   *  「跟随」就有概率跟错对象（2026-11-10 用户报告并源码坐实）。 */
+  /** 成员 agent 所在树的 Lead（树根）——rc.3 权威 API。自己是 root 时返回 null。 */
   function leadOf(memberAgent) {
-    const teams = ctx.get('agentTeams', false)
-    if (!teams || typeof teams.tryMembership !== 'function') return null
+    const subagents = ctx.get('subagents', false)
+    if (!subagents?.rootOf) return null
     try {
-      const membership = teams.tryMembership(memberAgent)
-      return membership?.role === 'teammate' ? membership.root : null
+      const root = subagents.rootOf(memberAgent)
+      if (!root || String(root.id) === String(memberAgent?.id)) return null
+      return root
     } catch {
       return null
     }
+  }
+
+  /** 读任意会话（冷/活）的 SessionHeader。ctx.sessions 只存活的会话，
+   *  冷会话必须走 sessionQuery（持久化语料，不唤醒 agent）。 */
+  async function readHeader(sessionId) {
+    const query = ctx.get('sessionQuery', false)
+    if (!query?.filterSessions) return null
+    try {
+      const rows = await query.filterSessions([{ kind: 'id', values: [String(sessionId)] }])
+      return rows?.[0]?.header ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** 根会话判定（冷会话也能判）：header.parentSession === undefined。
+   *  活 agent 直接用 session.header；冷会话读持久化 header。 */
+  async function isRootSession(sessionId) {
+    const live = ctx.agents.get(sessionId)
+    if (live) return isRoot(live)
+    const header = await readHeader(sessionId)
+    if (!header) return false // 读不到就不当根，避免误吞正常会话
+    return header.parentSession === undefined
+  }
+
+  /** session id -> 成员展示行。活成员走 subagents API；冷成员读持久化 header +
+   *  耐久子会话目录（subagents.listDescendants 不加载 agent）。 */
+  async function resolveMember(sessionId) {
+    const key = String(sessionId)
+    const subagents = ctx.get('subagents', false)
+    const live = ctx.agents.get(sessionId)
+    if (live && !isRoot(live)) {
+      let name = key
+      try {
+        const names = subagents?.namesOf?.(live)
+        if (names?.self) name = names.self
+      } catch {
+        // 名字拿不到就用 session id
+      }
+      return { id: key, role: 'teammate', name, status: 'running' }
+    }
+    const header = await readHeader(sessionId)
+    if (!header?.parentSession) return null // 根会话或读不到 → 不是成员
+    const rootId = header.parentSession
+    let name = null
+    if (subagents?.listDescendants) {
+      try {
+        const rows = await subagents.listDescendants(rootId)
+        const hit = (rows ?? []).find((row) => row?.kind !== 'diagnostic' && String(row?.id) === key)
+        if (hit) name = hit.path ?? hit.label ?? null
+      } catch {
+        // 目录读不到就退回标题
+      }
+    }
+    if (!name) {
+      const query = ctx.get('sessionQuery', false)
+      try {
+        const title = await query?.readTitle?.(sessionId)
+        name = title?.title ?? null
+      } catch {
+        name = null
+      }
+    }
+    return { id: key, role: 'teammate', name: name ?? key, status: live ? 'running' : 'inactive' }
   }
 
   // ---- v2 核心：把路线写进成员会话的 model/selection ----
@@ -328,10 +374,12 @@ export async function apply(ctx, config) {
 
   async function stateFor(sessionId) {
     const key = String(sessionId)
-    const member = resolveMember(sessionId)
+    const member = await resolveMember(sessionId)
     const live = ctx.agents.get(sessionId)
-    const delegated = Boolean(live && !isRoot(live))
-    const remembered = Boolean(members[key]) && !(live && isRoot(live))
+    // 根会话（Lead / 普通主对话）永不显示本插件胶囊；官方模型选择器负责它们。
+    const rootSession = await isRootSession(sessionId)
+    const delegated = Boolean(live && !rootSession)
+    const remembered = Boolean(members[key]) && !rootSession
     const liveRoute = live ? currentRouteOf(live) ?? liveOptionsRouteOf(live) : null
     const inherited =
       liveRoute ??
@@ -370,10 +418,16 @@ export async function apply(ctx, config) {
         if (route) {
           const applied = await routeApplies(route)
           if (!applied) return sendJson(res, 400, { ok: false, error: `模型 ${route.provider}/${route.model} 当前不可用` }), true
+          // 防御：根会话（Lead/主对话）不走本插件写入。
+          // rc.3 之前 isRoot 恒 false，会把路线误写进 Lead 本体，这里双重把关：
+          // 活 agent 查 header，冷会话走持久化 header。
+          if (await isRootSession(sessionId)) {
+            return sendJson(res, 400, { ok: false, error: '根会话请用官方模型选择器' }), true
+          }
           members[sessionId] = { ...route, savedAt: new Date().toISOString() }
           // 成员活着就立刻 select 进去；冷着就等唤醒时挂点 1 套用
           const live = ctx.agents.get(sessionId)
-          if (live && !isRoot(live)) await applyRouteToAgent(live, applied)
+          if (live) await applyRouteToAgent(live, applied)
         } else {
           delete members[sessionId]
           // 清除指定：跟随模式下不删成员会话里已有的 model/selection，

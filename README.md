@@ -9,6 +9,10 @@
 宿主本身不给子会话开模型选择器（`dsh-client-ui-model-selection/lib/client.js:1873` 用
 `available: sessions.subagentAddress(sessionId) === void 0` 明确禁掉）。
 
+> **版本要求：v3 起需要 dsh ≥ 0.2.2-rc.3**（rc.3 删除了 `ctx.agents.roots()` 与
+> `agentTeams.listMembers/tryMembership()`，v3 改用 `ctx.subagents` + `ctx.sessionQuery`）。
+> dsh 0.2.2-rc.1/rc.2 请用 v2.2.x。
+
 ## 界面
 
 打开任意一个团队成员的会话（团队面板点成员，或侧栏里的子会话），输入框左下出现：
@@ -31,7 +35,7 @@ dom.deepseek-v4-flash  ⌄      ← 已指定（强调色，无边框透明底 2
 | 指定的模型线路挂了（503 / DNS） | 该成员请求失败；点「恢复跟随主对话（清除指定）」回退 |
 | 主会话 | 一律不改（官方模型选择器负责） |
 
-## 实现（v2）
+## 实现（v3，适配 dsh 0.2.2-rc.3）
 
 - Host（`index.js`）：不再碰 `agent/request`（dsh 0.2.2-rc.1 起步骤准备后固定选择，
   waterfall 提议不同 provider/model 会直接 throw）。改为两个合法挂点，全程走
@@ -43,10 +47,16 @@ dom.deepseek-v4-flash  ⌄      ← 已指定（强调色，无边框透明底 2
     捕获，零滞后），无指定路线则把 Lead 的 `model.current()` 同步进来——这是
     「跟随」的实现。
   - `POST /route` 时成员活着就立刻 `select`，不用等下一步。
-- 名册解析：活成员经 `agentTeams.tryMembership` 直查权威 Lead 的名册行
-  （`agent.session.header.parentSession` 绑定，不会认错团队）；冷成员退回遍历
-  live agent（仅用于 chip 显示名字/状态）。全冷时靠已存路由让胶囊继续显示，
-  否则没法清除。
+- 解析层（v3，rc.3 权威 API）：
+  - 根判定：`agent.session.header.parentSession === undefined`；冷会话用
+    `ctx.sessionQuery.filterSessions([{kind:'id'}])` 读持久化 header（`ctx.sessions`
+    只存 live 会话，冷会话拿不到）。
+  - Lead：`ctx.subagents.rootOf(memberAgent)`（返回树根 Agent，自己就是 root 时跳过）。
+    这是 rc.3 官方团队插件同款路径，不依赖任何名册遍历。
+  - 成员名：活成员 `ctx.subagents.namesOf(agent).self`；冷成员
+    `ctx.subagents.listDescendants(rootId)` 取 `path`（只读耐久目录，不唤醒 agent），
+    退不到再读会话标题。
+  - 根会话的 `POST /route` 直接 400（`根会话请用官方模型选择器`），双重把关活/冷。
 - 校验：`llm.resolveModelInfo(provider, model)`，线路不在就直接 400 拒收，不写脏数据。
 - 落盘：`$DSH_HOME/plugin-data/team-member-model.json`（激活时读回，写盘走 tmp+rename）。
 - Client（`client.js`）：注册进 list 型插槽 `conversation.input.left`（`replaceRisk: none`，
@@ -97,7 +107,7 @@ zstdcat ~/.dsh/sessions/<workspace-slug>/<childId>/session.v4.jsonl.zstd \
 卸载：`plugin_manager remove_bundle dsh-team-member-model`，路由文件可自行删除
 （`~/.dsh/plugin-data/team-member-model.json`）。
 
-## 已知边界（v2）
+## 已知边界（v3）
 
 - 只有输入框胶囊，没有设置页；不能给「未来新建的 teammate」设默认值（那属于
   Lead 模型 / `agent-default-model` 的事）。
@@ -126,3 +136,19 @@ zstdcat ~/.dsh/sessions/<workspace-slug>/<childId>/session.v4.jsonl.zstd \
   服务时插件整体不加载（fail-closed，不会静默裸奔）。详见上面「HTTP 面」的准入节。
 - 宿主模型目录 ≠ AIHub 线路实况：目录随 dsh 版本变化（`qoder.Qwen3.8-Flash` 曾在
   目录里、2026-11-09 已不在），指定前最好先在面板里看一眼列表。
+- **v3（2026-11-14，适配 dsh 0.2.2-rc.3）**：rc.3 删除 `ctx.agents.roots()` 与
+  `agentTeams.listMembers/tryMembership()` 后，v2.2 的解析层全部失效——`isRoot()` 抛错被
+  catch 成恒 false，于是**主对话也被当成子会话**：胶囊显示在主对话，点它还会把
+  `model/selection` 写进 Lead 会话本体。v3 按上面「解析层」改用 `ctx.subagents`
+  （`rootOf`/`namesOf`/`listDescendants`）+ `session.header.parentSession`，
+  写入通路（`agent.model.select()`、`agent/created`、`agent/inbox/claimed`）与
+  v2.2 的 HTTP 围栏完全不变。
+  - 隔离实例（0.2.2-rc.3）实测：Lead 会话 `/state` → `teammate/delegated/remembered` 全 false、
+    `POST /route` → 400；冷成员 → `teammate:true` 且取到名字；给成员 `POST /route` → 200 落盘。
+  - 离线行为测试（mock ctx）：根 `agent/created` 不写；成员 `agent/created` 跟随 Lead 当前模型；
+    `agent/inbox/claimed` 在 Lead 换模型后对齐；指定后不再跟随；`rootOf` 抛错不崩不写。
+  - 已知差异：rc.3 之前创建的旧成员不在 rc.3 的 `subagents` 耐久目录里 → 名字退回会话标题
+    （`path` 为空）；rc.3 之后新建的成员应能拿到斜杠路径名。
+- 与 rc.3 原生「子智能体设置 → 可选模型」的关系：原生落 `subagent/model-selection-policy`
+  白名单，作用在**派工时**（Lead 派子智能体可挑允许范围内的模型），并且官方模型选择器
+  对子会话仍写死不可用。本插件负责**用户侧、逐成员、跟随/指定**，两者不冲突。

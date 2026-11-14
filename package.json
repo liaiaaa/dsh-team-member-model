@@ -1,7 +1,7 @@
 {
   "name": "dsh-team-member-model",
-  "version": "2.2.0",
-  "description": "dsh 插件：为团队模式（Agent Teams）的每个子队友单独指定模型，或跟随主对话当前模型切换（per-teammate model pin / follow）",
+  "version": "2.3.0",
+  "description": "dsh 插件：为团队模式（Agent Teams）的每个子队友单独指定模型，或跟随主对话当前模型切换（per-teammate model pin / follow；适配 dsh 0.2.2-rc.3）",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -33,11 +33,15 @@
     "README.md"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   },
   "icon": "icon.svg"
